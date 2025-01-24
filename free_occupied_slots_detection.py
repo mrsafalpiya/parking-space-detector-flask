@@ -1,5 +1,3 @@
-import os
-
 import boto3
 import cv2
 from dotenv import load_dotenv

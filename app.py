@@ -2,6 +2,9 @@ import cv2
 from flask import Flask, request, send_file, Response
 from flask_cors import CORS
 from flask_sock import Sock
+
+from db import insert_arrival_entry, insert_exit_entry
+from free_slot_prediction import get_free_slot_predictions
 from roi_detection import get_roi_coordinates
 from image import raw_bytes_to_cv2_image, draw_boxes
 from environment_config import fov_angle, distance, object_width
@@ -10,6 +13,7 @@ import threading
 import json
 import os
 import time
+from datetime import datetime
 
 app = Flask(__name__)
 CORS(app)
@@ -29,6 +33,8 @@ vehicle_labels = ['Machine', 'Wheel', 'Car', 'Car Wheel', 'Truck', 'Bulldozer', 
 # last slots information
 # used to get the difference between the last and current slots information to know the vehicle which has entered or exited recently
 last_slots_info = None
+last_slots_info_time = None
+last_slots_info_week = None
 
 
 @app.route('/roi-detection', methods=['POST'])
@@ -78,8 +84,14 @@ def upload():
 
 @sock.route('/connect')
 def ws_connect(ws):
-    global ws_client
+    global ws_client, last_slots_info, last_slots_info_time, last_slots_info_week
     ws_client = ws
+
+    # Reset the last slots info
+    last_slots_info = None
+    last_slots_info_time = None
+    last_slots_info_week = None
+
     while True:
         data = ws.receive()
         if data == 'stop':
@@ -106,8 +118,10 @@ def get_parking_details():
     print("[DEBUG] evt.wait() complete from /slot-details", flush=True)
 
     slot_details = get_slot_details()
+    free_slot_prediction = get_free_slot_predictions()
 
-    return Response(json.dumps({'parking_slots': slot_details}), mimetype='application/json')
+    return Response(json.dumps({'parking_slots': slot_details, 'free_slot_predictions': free_slot_prediction}),
+                    mimetype='application/json')
 
 
 @app.route('/is-parking-slot-available')
@@ -139,19 +153,11 @@ def is_parking_slot_available():
     print(f"[DEBUG] Available parking slots: {available_count}", flush=True)
     print(f"[DEBUG] Slot details: {slot_details}", flush=True)
 
-    return str(available_count)
-
-
-@app.after_request
-def after_request(response):
-    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate, public, max-age=0"
-    response.headers["Expires"] = 0
-    response.headers["Pragma"] = "no-cache"
-    return response
+    return 'true' if available_count > 0 else 'false'
 
 
 def get_slot_details():
-    global last_slots_info
+    global last_slots_info, last_slots_info_time, last_slots_info_week
 
     # Remove old images
     for i in range(len(roi_coordinates)):
@@ -201,14 +207,26 @@ def get_slot_details():
     if last_slots_info is not None:
         for i, slot in enumerate(slot_details):
             if slot['is_occupied'] and not last_slots_info[i]['is_occupied']:
-                print("Vehicle Entered:", slot['plate_number'])
+                print("Vehicle Entered:", slot['plate_number'], 'at', last_slots_info_week, last_slots_info_time)
+                insert_arrival_entry(slot['plate_number'], last_slots_info_week, last_slots_info_time)
             elif not slot['is_occupied'] and last_slots_info[i]['is_occupied']:
-                print("Vehicle Exited:", last_slots_info[i]['plate_number'])
-        pass
+                print("Vehicle Exited:", last_slots_info[i]['plate_number'], 'at', last_slots_info_week,
+                      time.strftime('%H:%M'))
+                insert_exit_entry(last_slots_info[i]['plate_number'], last_slots_info_week, time.strftime('%H:%M'))
 
     last_slots_info = slot_details
+    last_slots_info_time = time.strftime('%H:%M')
+    last_slots_info_week = datetime.today().strftime("%A")
 
     return slot_details
+
+
+@app.after_request
+def after_request(response):
+    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate, public, max-age=0"
+    response.headers["Expires"] = 0
+    response.headers["Pragma"] = "no-cache"
+    return response
 
 
 if __name__ == '__main__':
