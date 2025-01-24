@@ -4,7 +4,7 @@ import uuid
 
 load_dotenv()
 
-dynamodb = boto3.client('dynamodb')
+dynamodb = boto3.client('dynamodb', region_name='ap-south-1')
 
 
 def get_all_parking_logs():
